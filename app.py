@@ -30,24 +30,50 @@ DB_CONFIG = {
 tunnel = None
 db_pool = None
 variable_name_map = {}
+code_name_map = {}  # Code → Name 映射
 
 
 def load_variable_name_map():
-    """将 CSV 中的 VariableName→Name 映射加载到内存"""
-    csv_path = os.path.join(os.path.dirname(__file__), 'device_parameter.csv')
-    if not os.path.exists(csv_path):
-        print(f"未找到映射文件: {csv_path}")
+    """从数据库读取 dms_device_parameter 表，加载映射到内存"""
+    if not db_pool:
+        print("错误：连接池未初始化")
         return
-
-    with open(csv_path, 'r', encoding='utf-8') as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            var_name = row.get('VariableName')
-            name = row.get('Name')
-            if var_name and name:
-                variable_name_map[str(var_name)] = str(name)
-
-    print(f"已加载映射条目数: {len(variable_name_map)}")
+    
+    try:
+        connection = db_pool.connection()
+        with connection.cursor() as cursor:
+            # 查询设备参数表
+            sql = "SELECT Code, VariableName, Name FROM iplantute.dms_device_parameter"
+            cursor.execute(sql)
+            rows = cursor.fetchall()
+            
+            var_count = 0
+            code_count = 0
+            
+            for row in rows:
+                code = row.get('Code')
+                var_name = row.get('VariableName')
+                name = row.get('Name')
+                
+                # Code → Name（Code 是唯一的）
+                if code and name:
+                    code_name_map[str(code)] = str(name)
+                    code_count += 1
+                
+                # VariableName → Name（允许重复）
+                if var_name and name:
+                    if var_name not in variable_name_map:
+                        var_count += 1
+                    variable_name_map[str(var_name)] = str(name)
+            
+            print(f"已从数据库加载参数映射:")
+            print(f"  Code 映射数: {code_count}")
+            print(f"  VariableName 映射数: {var_count} (去重后)")
+            
+        connection.close()
+        
+    except Exception as e:
+        print(f"加载映射失败: {str(e)}")
 
 def init_connection_pool():
     """初始化 SSH 隧道和数据库连接池"""
@@ -68,9 +94,9 @@ def init_connection_pool():
     print("正在创建数据库连接池...")
     db_pool = PooledDB(
         creator=pymysql,
-        maxconnections=20,        # 最大连接数
-        mincached=5,              # 初始化时至少创建的空闲连接
-        maxcached=10,             # 连接池中最多空闲连接数
+        maxconnections=30,        # 最大连接数
+        mincached=10,              # 初始化时至少创建的空闲连接
+        maxcached=24,             # 连接池中最多空闲连接数
         maxshared=0,              # 共享连接数（0 表示不共享）
         blocking=True,            # 连接数达到最大时，新连接是否阻塞
         maxusage=0,               # 单个连接最多被使用次数（0 表示无限制）
@@ -125,7 +151,7 @@ def process_data():
         
         with connection.cursor() as cursor:
             # 执行查询
-            table_name = f"dms_device_workparams_{code}"
+            table_name = f"dms_device_technology_{code}"
             sql = f"SELECT * FROM iplantute.{table_name} ORDER BY ID DESC LIMIT 1"
             cursor.execute(sql)
             result = cursor.fetchone()
@@ -133,13 +159,19 @@ def process_data():
             elapsed = (time.time() - start_time) * 1000
             
             if result:
-                # 将 VariableName 映射为 Name
+                # 尝试映射：优先用 Code，其次用 VariableName，都失败则跳过
                 mapped = {}
                 for k, v in result.items():
-                    mapped_key = variable_name_map.get(str(k), k)
-                    mapped[mapped_key] = v
+                    # 先尝试 Code 映射
+                    mapped_key = code_name_map.get(str(k))
+                    if mapped_key is None:
+                        # 再尝试 VariableName 映射
+                        mapped_key = variable_name_map.get(str(k))
+                    
+                    if mapped_key is not None:
+                        mapped[mapped_key] = v
 
-                print(f"[查询成功] code={code}, 耗时: {elapsed:.2f}ms")
+                print(f"[查询成功] code={code}, 耗时: {elapsed:.2f}ms, 原始字段数={len(result)}, 映射字段数={len(mapped)}")
                 return jsonify({
                     'success': True,
                     'data': mapped,
@@ -168,6 +200,80 @@ def process_data():
         if connection:
             connection.close()
 
+@app.route('/api/efficiency_data', methods=['GET', 'POST'])
+def efficiency_data():
+    start_time = time.time()
+    connection = None
+    
+    try:
+        # 获取 code 参数
+        if request.method == 'POST':
+            code = request.json.get('code')
+        else:
+            code = request.args.get('code')
+        
+        if not code:
+            elapsed = (time.time() - start_time) * 1000
+            print(f"[请求失败] 耗时: {elapsed:.2f}ms - 缺少 code 参数")
+            return jsonify({
+                'success': False,
+                'error': '缺少 code 参数'
+            }), 400
+        
+        # 从连接池获取连接
+        connection = db_pool.connection()
+        
+        with connection.cursor() as cursor:
+            # 执行查询
+            table_name = f"dms_device_workparams_{code}"
+            sql = f"SELECT * FROM iplantute.{table_name} ORDER BY ID DESC LIMIT 1"
+            cursor.execute(sql)
+            result = cursor.fetchone()
+            
+            elapsed = (time.time() - start_time) * 1000
+            
+            if result:
+                # 尝试映射：优先用 Code，其次用 VariableName，都失败则跳过
+                mapped = {}
+                for k, v in result.items():
+                    # 先尝试 Code 映射
+                    mapped_key = code_name_map.get(str(k))
+                    if mapped_key is None:
+                        # 再尝试 VariableName 映射
+                        mapped_key = variable_name_map.get(str(k))
+                    
+                    if mapped_key is not None:
+                        mapped[mapped_key] = v
+
+                print(f"[查询成功] code={code}, 耗时: {elapsed:.2f}ms, 原始字段数={len(result)}, 映射字段数={len(mapped)}")
+                return jsonify({
+                    'success': True,
+                    'data': mapped,
+                    'elapsed_ms': round(elapsed, 2)
+                })
+            else:
+                print(f"[无数据] code={code}, 耗时: {elapsed:.2f}ms")
+                return jsonify({
+                    'success': True,
+                    'data': None,
+                    'message': '未查询到数据',
+                    'elapsed_ms': round(elapsed, 2)
+                })
+                
+    except Exception as e:
+        elapsed = (time.time() - start_time) * 1000
+        print(f"[查询异常] 耗时: {elapsed:.2f}ms - 错误: {str(e)}")
+        return jsonify({
+            'success': False,
+            'error': str(e),
+            'elapsed_ms': round(elapsed, 2)
+        }), 500
+    
+    finally:
+        # 归还连接到连接池
+        if connection:
+            connection.close()
+            
 @app.route('/health', methods=['GET'])
 def health_check():
     return jsonify({'status': 'ok'})
@@ -187,18 +293,21 @@ def pool_status():
         }), 503
 
 if __name__ == '__main__':
-    # 预加载 CSV 映射
-    load_variable_name_map()
     # 启动前初始化连接池
     init_connection_pool()
+    # 从数据库加载映射（需要先初始化连接池）
+    load_variable_name_map()
     
     # 使用 Waitress 启动生产级服务器
     print("正在启动 Waitress 服务器...")
     print("服务地址: http://0.0.0.0:5000")
     print("按 Ctrl+C 停止服务")
     try:
-        serve(app, host='0.0.0.0', port=5000, threads=16)
+        serve(app, host='0.0.0.0', port=5000, threads=32)
     except KeyboardInterrupt:
         print("\n接收到终止信号...")
     finally:
         cleanup()
+
+
+
