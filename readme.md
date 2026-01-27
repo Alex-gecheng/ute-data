@@ -174,6 +174,56 @@ curl -X POST http://localhost:5000/api/detailed_online_inspection ^
 }
 ```
 
+## 首页首巡检数据
+
+```
+EXPLAIN
+SELECT *
+FROM ute_mes_qms_new.t_qms_sj_taskiptitem
+ORDER BY id DESC
+LIMIT 3;
+```
+
+接口
+
+```
+/api/home_inspection
+```
+
+```
+curl   http://localhost:5000/api/home_inspection
+```
+
+返回结果
+
+```
+{
+  "data": [
+    {
+      "type": "巡检",
+      "不合格数": 0,
+      "合格数": "12",
+      "抽检数": "12"
+    },
+    {
+      "type": "巡检",
+      "不合格数": 0,
+      "合格数": "12",
+      "抽检数": "12"
+    },
+    {
+      "type": "巡检",
+      "不合格数": 0,
+      "合格数": "14",
+      "抽检数": "14"
+    }
+  ],
+  "elapsed_ms": 40.96,
+  "success": true
+}
+
+```
+
 
 
 
