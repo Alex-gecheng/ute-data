@@ -7,8 +7,26 @@ import atexit
 import csv
 import os
 from waitress import serve
+from flask_cors import CORS
 
 app = Flask(__name__)
+
+# 配置跨域（CORS）：默认仅允许局域网/私有网段与本机访问
+# 通过环境变量 CORS_MODE 控制：'private'（默认）或 'all'
+CORS_MODE = os.getenv('CORS_MODE', 'private').lower()
+if CORS_MODE == 'all':
+    # 允许所有来源（更开放，适用于快速联调）
+    CORS(app, resources={r"/*": {"origins": "*", "methods": ["GET", "POST", "OPTIONS"]}})
+else:
+    # 仅允许常见私有网段与本机（局域网）
+    PRIVATE_ORIGINS = [
+        r"http://localhost(:\d+)?",
+        r"http://127\.0\.0\.1(:\d+)?",
+        r"http://192\.168\.\d{1,3}\.\d{1,3}(:\d+)?",
+        r"http://10\.\d{1,3}\.\d{1,3}\.\d{1,3}(:\d+)?",
+        r"http://172\.(1[6-9]|2[0-9]|3[0-1])\.\d{1,3}\.\d{1,3}(:\d+)?"
+    ]
+    CORS(app, resources={r"/*": {"origins": PRIVATE_ORIGINS, "methods": ["GET", "POST", "OPTIONS"]}})
 
 # SSH 和数据库信息
 SSH_CONFIG = {
@@ -126,6 +144,8 @@ def cleanup():
 # 注册退出时的清理函数
 atexit.register(cleanup)
 
+
+# 工艺数据
 @app.route('/api/process_data', methods=['GET', 'POST'])
 def process_data():
     start_time = time.time()
@@ -200,6 +220,7 @@ def process_data():
         if connection:
             connection.close()
 
+# 效率数据
 @app.route('/api/efficiency_data', methods=['GET', 'POST'])
 def efficiency_data():
     start_time = time.time()
@@ -273,7 +294,87 @@ def efficiency_data():
         # 归还连接到连接池
         if connection:
             connection.close()
+
+# 详细在线检验数据
+@app.route('/api/detailed_online_inspection', methods=['GET', 'POST'])
+def detailed_online_inspection():
+    start_time = time.time()
+    connection = None
+    
+    try:
+        # 获取 code 参数
+        if request.method == 'POST':
+            code = request.json.get('code')
+        else:
+            code = request.args.get('code')
+        
+        if not code:
+            elapsed = (time.time() - start_time) * 1000
+            print(f"[请求失败] 耗时: {elapsed:.2f}ms - 缺少 code 参数")
+            return jsonify({
+                'success': False,
+                'error': '缺少 code 参数'
+            }), 400
+        
+        # 从连接池获取连接
+        connection = db_pool.connection()
+        
+        with connection.cursor() as cursor:
+            # 执行查询
+            table_name = f"dms_device_qualityparams_{code}"
+            sql = f"SELECT * FROM iplantute.{table_name} ORDER BY ID DESC LIMIT 1"
+            cursor.execute(sql)
+            result = cursor.fetchone()
             
+            elapsed = (time.time() - start_time) * 1000
+            
+            if result:
+                # 尝试映射：优先用 Code，其次用 VariableName，都失败则跳过
+                mapped = {}
+                for k, v in result.items():
+                    # 先尝试 Code 映射
+                    mapped_key = code_name_map.get(str(k))
+                    if mapped_key is None:
+                        # 再尝试 VariableName 映射
+                        mapped_key = variable_name_map.get(str(k))
+                    
+                    if mapped_key is not None:
+                        mapped[mapped_key] = v
+
+                print(f"[查询成功] code={code}, 耗时: {elapsed:.2f}ms, 原始字段数={len(result)}, 映射字段数={len(mapped)}")
+                return jsonify({
+                    'success': True,
+                    'data': mapped,
+                    'elapsed_ms': round(elapsed, 2)
+                })
+            else:
+                print(f"[无数据] code={code}, 耗时: {elapsed:.2f}ms")
+                return jsonify({
+                    'success': True,
+                    'data': None,
+                    'message': '未查询到数据',
+                    'elapsed_ms': round(elapsed, 2)
+                })
+                
+    except Exception as e:
+        elapsed = (time.time() - start_time) * 1000
+        print(f"[查询异常] 耗时: {elapsed:.2f}ms - 错误: {str(e)}")
+        return jsonify({
+            'success': False,
+            'error': str(e),
+            'elapsed_ms': round(elapsed, 2)
+        }), 500
+    
+    finally:
+        # 归还连接到连接池
+        if connection:
+            connection.close()
+
+
+
+
+
+
 @app.route('/health', methods=['GET'])
 def health_check():
     return jsonify({'status': 'ok'})
