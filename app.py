@@ -230,7 +230,7 @@ def process_data():
         with connection.cursor() as cursor:
             # 执行查询
             table_name = f"dms_device_technology_{code}"
-            sql = f"SELECT * FROM iplantute.{table_name} ORDER BY ID DESC LIMIT 1"
+            sql = f"SELECT * FROM iplantute.`{table_name}` ORDER BY ID DESC LIMIT 1"
             cursor.execute(sql)
             result = cursor.fetchone()
             
@@ -305,7 +305,7 @@ def efficiency_data():
         with connection.cursor() as cursor:
             # 执行查询
             table_name = f"dms_device_workparams_{code}"
-            sql = f"SELECT * FROM iplantute.{table_name} ORDER BY ID DESC LIMIT 1"
+            sql = f"SELECT * FROM iplantute.`{table_name}` ORDER BY ID DESC LIMIT 1"
             cursor.execute(sql)
             result = cursor.fetchone()
             
@@ -380,7 +380,7 @@ def detailed_online_inspection():
         with connection.cursor() as cursor:
             # 执行查询
             table_name = f"dms_device_qualityparams_{code}"
-            sql = f"SELECT * FROM {table_name} ORDER BY ID DESC LIMIT 1"
+            sql = f"SELECT * FROM `{table_name}` ORDER BY ID DESC LIMIT 1"
             cursor.execute(sql)
             result = cursor.fetchone()
             
@@ -430,7 +430,7 @@ def detailed_online_inspection():
 
 
 # 首页首巡检  MES系统数据
-@app.route('/api/home_inspection', methods=['GET'])
+@app.route('/api/home_inspection', methods=['GET','POST'])
 def home_inspection():
         start_time = time.time()
         connection = None
