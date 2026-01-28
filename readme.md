@@ -1,6 +1,6 @@
 ## 工艺数据接口
 
-请求间隔1s
+get,post 请求       请求间隔1s
 
 post请求
 
@@ -9,8 +9,6 @@ curl -X POST http://localhost:5000/api/process_data ^
  -H "Content-Type: application/json" ^
  -d "{\"code\":\"07_4_3mz2010\"}"
  curl -X POST 
-
-
 ```
 
 get
@@ -73,7 +71,7 @@ get
 
 ## 效率接口数据
 
-请求间隔1s
+get,post 请求    请求间隔1s
 
 接口
 
@@ -119,7 +117,7 @@ get
 
 ## 详细页在线巡检数据
 
-接口
+get,post 请求  接口
 
 ```
 /api/detailed_online_inspection
@@ -176,6 +174,8 @@ curl -X POST http://localhost:5000/api/detailed_online_inspection ^
 
 ## 首页首巡检数据
 
+get,post 请求    MES数据库
+
 ```
 EXPLAIN
 SELECT *
@@ -184,7 +184,7 @@ ORDER BY id DESC
 LIMIT 3;
 ```
 
-接口
+接口   不需要code
 
 ```
 /api/home_inspection
