@@ -7,8 +7,8 @@ post请求
 ```
 curl -X POST http://localhost:5000/api/process_data ^
  -H "Content-Type: application/json" ^
- -d "{\"code\":\"07_4_3mz2010\"}"
- curl -X POST 
+ -d "{\"code\":\"07_4_3mz2010\"}" 
+
 ```
 
 get
@@ -115,6 +115,40 @@ get,post 请求    请求间隔1s
 
 ```
 
+## 详细页首巡检数据
+
+```
+/api/details_inspection
+```
+
+需要code
+
+模拟数据
+
+```
+{
+  "内径尺寸标准": "φ17(-0.0005~-0.0035)",
+  "内径尺寸结果": "合格",
+  "垂直差标准": "0.002",
+  "垂直差结果": "合格",
+  "壁厚差标准": "0.0015",
+  "壁厚差结果": "合格",
+  "椭圆标准": "0.001",
+  "椭圆结果": "合格",
+  "锥度标准": "0.001",
+  "锥度结果": "合格",
+  "粗糙度标准": "Ra 0.2μm",
+  "粗糙度结果": "合格",
+  "表面质量标准": "无缺陷",
+  "表面质量结果": "不合格",
+  "表面质量备注": "2个生锈"
+}
+```
+
+
+
+
+
 ## 详细页在线巡检数据
 
 get,post 请求  接口
@@ -126,8 +160,7 @@ get,post 请求  接口
 ```
 curl -X POST http://localhost:5000/api/detailed_online_inspection ^
  -H "Content-Type: application/json" ^
- -d "{\"code\":\"01_2_lxng_da30\"}"
- curl -X POST 
+ -d "{\"code\":\"01_2_lxng_da30\"}" 
 ```
 
 请求间隔10s      0.1qps   
@@ -171,6 +204,53 @@ curl -X POST http://localhost:5000/api/detailed_online_inspection ^
   "success": true
 }
 ```
+
+## 首页在线检验数据
+
+查询的表单数据即为如上(详细页在线巡检数据)
+
+接口     需要code参数
+
+```
+/api/home_online_inspection
+```
+
+```
+curl -X POST http://localhost:5000/api/home_online_inspection ^
+ -H "Content-Type: application/json" ^
+ -d "{\"code\":\"01_2_lxng_da30\"}" 
+```
+
+返回数据
+
+```
+{
+  "success": true,
+  "elapsed_ms": 125.4,
+  "data": {
+    "抽检数": 5,
+
+    "合格数": 5,
+    "不合格数": 0,
+    "预检不合格数": 0,
+
+    "测量总数量": 247046.0,
+    "合格总数量": 210278.0,
+    "内径合格率": 85.0,
+
+    "尺寸返工总数量": 17422.0,
+    "尺寸报废总数量": 36506.0,
+
+    "圆度返工总数量": 81.0,
+    "锥度返工总数量": 6884.0
+  }
+}
+
+```
+
+
+
+
 
 ## 首页首巡检数据
 

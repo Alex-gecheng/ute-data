@@ -374,7 +374,7 @@ def detailed_online_inspection():
                 'error': '缺少 code 参数'
             }), 400
         
-        # 从 225 连接池获取连接
+        # 从连接池获取连接
         connection = db_pool_scada.connection()
         
         with connection.cursor() as cursor:
@@ -417,6 +417,126 @@ def detailed_online_inspection():
     except Exception as e:
         elapsed = (time.time() - start_time) * 1000
         print(f"[查询异常-225] 耗时: {elapsed:.2f}ms - 错误: {str(e)}")
+        return jsonify({
+            'success': False,
+            'error': str(e),
+            'elapsed_ms': round(elapsed, 2)
+        }), 500
+    
+    finally:
+        # 归还连接到连接池
+        if connection:
+            connection.close()
+
+# 首页在线检验数据    
+@app.route('/api/home_online_inspection', methods=['GET','POST'])
+def home_online_inspection():
+    start_time = time.time()
+    connection = None
+    
+    try:
+        # 获取 code 参数
+        if request.method == 'POST':
+            code = request.json.get('code')
+        else:
+            code = request.args.get('code')
+        
+        if not code:
+            elapsed = (time.time() - start_time) * 1000
+            print(f"[请求失败-225] 耗时: {elapsed:.2f}ms - 缺少 code 参数")
+            return jsonify({
+                'success': False,
+                'error': '缺少 code 参数'
+            }), 400
+        
+        # 从连接池获取连接
+        connection = db_pool_scada.connection()
+        
+        with connection.cursor() as cursor:
+            # 执行查询
+            table_name = f"dms_device_qualityparams_{code}"
+            sql = f"SELECT * FROM `{table_name}` ORDER BY ID DESC LIMIT 1"
+            cursor.execute(sql)
+            result = cursor.fetchone()
+            
+            elapsed = (time.time() - start_time) * 1000
+            
+            if result:
+                # 尝试映射：优先用 Code，其次用 VariableName，都失败则保留原key
+                mapped = {}
+                for k, v in result.items():
+                    # 先尝试 Code 映射
+                    mapped_key = code_name_map.get(str(k))
+                    if mapped_key is None:
+                        # 再尝试 VariableName 映射
+                        mapped_key = variable_name_map.get(str(k))
+                    
+                    # 如果映射失败，保留原来的key
+                    if mapped_key is None:
+                        mapped_key = k
+                    mapped[mapped_key] = v
+
+                # 从 mapped 中提取所需字段
+                result_values = [
+                    v for k, v in mapped.items()
+                    if k.endswith("结果") and isinstance(v, str)
+                ]
+
+                sample_count = len(result_values)
+                qualified_count = sum(1 for v in result_values if v == "合格")
+                unqualified_count = sample_count - qualified_count
+
+                # 2. 直接读取的统计项（不存在则默认 0）
+                total_measure_count = mapped.get("内径测量总数量", 0)
+                total_qualified_count = mapped.get("内径合格总数量", 0)
+                inner_diameter_pass_rate = mapped.get("内径合格率", 0)
+
+                precheck_unqualified_count = mapped.get("预检不合格数量", 0)
+
+                dimension_scrap_total = mapped.get("尺寸报废总数量", 0)
+                dimension_rework_total = mapped.get("尺寸返工总数量", 0)
+                roundness_rework_total = mapped.get("圆度返工总数量", 0)
+                taper_rework_total = mapped.get("锥度返工总数量", 0)
+
+                # 3. 机检（示例：存在设备状态即可认为有机检）
+                # machine_inspection = 1 if "设备状态" in mapped else 0
+
+                # 4. 汇总结果
+                data = {
+                    "抽检数": sample_count,
+                    "合格数": qualified_count,
+                    "不合格数": unqualified_count,
+
+                    "测量总数量": total_measure_count,
+                    "合格总数量": total_qualified_count,
+                    "内径合格率": inner_diameter_pass_rate,
+
+                    "预检不合格数": precheck_unqualified_count,
+
+                    "尺寸报废总数量": dimension_scrap_total,
+                    "尺寸返工总数量": dimension_rework_total,
+                    "圆度返工总数量": roundness_rework_total,
+                    "锥度返工总数量": taper_rework_total,
+                }
+
+                print(f"[查询成功] code={code}, 耗时: {elapsed:.2f}ms, 原始字段数={len(result)}, 映射字段数={len(mapped)}")
+                return jsonify({
+                    'success': True,
+                    'data': data,
+                    'elapsed_ms': round(elapsed, 2)
+                })
+            else:
+                print(f"[无数据] code={code}, 耗时: {elapsed:.2f}ms")
+                return jsonify({
+                    'success': True,
+                    'data': None,
+                    'message': '未查询到数据',
+                    'elapsed_ms': round(elapsed, 2)
+                })
+                
+    except Exception as e:
+        elapsed = (time.time() - start_time) * 1000
+        print(f"[查询异常-home_online] 耗时: {elapsed:.2f}ms - 错误: {str(e)}")
         return jsonify({
             'success': False,
             'error': str(e),
@@ -492,8 +612,31 @@ def home_inspection():
             if connection:
                 connection.close()
 
-
-
+# 详情页首巡检    模拟数据
+@app.route('/api/details_inspection', methods=['GET','POST'])
+def details_inspection():
+        # 模拟数据返回
+        data = {
+            "内径尺寸标准": "φ17(-0.0005~-0.0035)",
+            "内径尺寸结果": "合格",
+            "垂直差标准": "0.002",
+            "垂直差结果": "合格",
+            "壁厚差标准": "0.0015",
+            "壁厚差结果": "合格",
+            "椭圆标准": "0.001",
+            "椭圆结果": "合格",
+            "锥度标准": "0.001",
+            "锥度结果": "合格",
+            "粗糙度标准": "Ra 0.2μm",
+            "粗糙度结果": "合格",
+            "表面质量标准": "无缺陷",
+            "表面质量结果": "不合格",
+            "表面质量备注": "2个生锈"
+        }
+        return jsonify({
+            'success': True,
+            'data': data
+        })
 
 @app.route('/health', methods=['GET'])
 def health_check():
