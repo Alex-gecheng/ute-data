@@ -385,53 +385,17 @@ curl http://localhost:5000/api/home_inspection
 
 ## 性能分析
 
-sql查询   索引取最后一个数据
+sql查询表使用索引取最后一个数据，时间复杂度`O(1)`
 
-微秒级别
-
-api查询     主要在传输时间
+api查询单次主要在传输时间
 
 ```
 [查询成功] code=07_4_3mz2010，耗时:44.54ms
 ```
 
-ssh下，并发     瓶颈在ssh
-
-20qps    1s
+ssh下，并发     瓶颈在ssh传输     约20qps
 
 ```
-================================================================================
-API 压力测试
-================================================================================
-目标 URL: http://localhost:5000
-Code: 07_4_3mz2010
-每个接口请求数: 10
-总请求数: 20
-================================================================================
-
-开始发送 20 个请求...
-
-[1/20] process_data #2: success (0.800s)
-[2/20] process_data #3: success (0.815s)
-[3/20] process_data #4: success (0.830s)
-[4/20] process_data #5: success (0.845s)
-[5/20] process_data #1: success (0.861s)
-[6/20] process_data #8: success (0.871s)
-[7/20] efficiency_data #1: success (0.883s)
-[8/20] process_data #10: success (0.898s)
-[9/20] efficiency_data #3: success (0.911s)
-[10/20] efficiency_data #2: success (0.927s)
-[11/20] efficiency_data #5: success (0.939s)
-[12/20] efficiency_data #4: success (0.955s)
-[13/20] efficiency_data #7: success (0.967s)
-[14/20] efficiency_data #6: success (0.982s)
-[15/20] efficiency_data #9: success (0.995s)
-[16/20] efficiency_data #8: success (1.011s)
-[17/20] process_data #6: success (1.040s)
-[18/20] process_data #9: success (1.050s)
-[19/20] efficiency_data #10: success (1.055s)
-[20/20] process_data #7: success (1.081s)
-
 ================================================================================
 测试结果统计
 ================================================================================
@@ -457,30 +421,34 @@ efficiency_data 接口结果:
   最慢: 1.055s
   平均查询时间(API内部): 579.53ms
   返回字段数: 22
-
 ================================================================================
+```
 
-详细请求结果:
---------------------------------------------------------------------------------
- 1. efficiency_data # 1: 0.883s | API耗时: 391.22ms | 字段数: 22
- 2. efficiency_data # 2: 0.927s | API耗时: 460.62ms | 字段数: 22
- 3. efficiency_data # 3: 0.911s | API耗时: 446.62ms | 字段数: 22
- 4. efficiency_data # 4: 0.955s | API耗时: 572.75ms | 字段数: 22
- 5. efficiency_data # 5: 0.939s | API耗时: 557.92ms | 字段数: 22
- 6. efficiency_data # 6: 0.982s | API耗时: 655.91ms | 字段数: 22
- 7. efficiency_data # 7: 0.967s | API耗时: 598.28ms | 字段数: 22
- 8. efficiency_data # 8: 1.011s | API耗时: 698.45ms | 字段数: 22
- 9. efficiency_data # 9: 0.995s | API耗时: 669.85ms | 字段数: 22
-10. efficiency_data #10: 1.055s | API耗时: 743.72ms | 字段数: 22
-11. process_data    # 1: 0.861s | API耗时: 259.21ms | 字段数: 40
-12. process_data    # 2: 0.800s | API耗时: 44.8ms | 字段数: 40
-13. process_data    # 3: 0.815s | API耗时: 142.17ms | 字段数: 40
-14. process_data    # 4: 0.830s | API耗时: 171.51ms | 字段数: 40
-15. process_data    # 5: 0.845s | API耗时: 214.95ms | 字段数: 40
-16. process_data    # 6: 1.040s | API耗时: 701.69ms | 字段数: 40
-17. process_data    # 7: 1.081s | API耗时: 757.86ms | 字段数: 40
-18. process_data    # 8: 0.871s | API耗时: 302.49ms | 字段数: 40
-19. process_data    # 9: 1.050s | API耗时: 730.28ms | 字段数: 40
-20. process_data    #10: 0.898s | API耗时: 434.9ms | 字段数: 40
+* 后续如果使用内网，去掉ssh部分，可极大提升性能
+* 可适当修改数据库连接池设置和多线程数量
+
+```
+db_pool_scada = PooledDB(
+        creator=pymysql,
+        maxconnections=30,
+        mincached=10,
+        maxcached=24,
+        maxshared=0,
+        blocking=True,
+        maxusage=0,
+        setsession=[],
+        ping=1,
+        host='127.0.0.1',
+        port=tunnel_scada.local_bind_port,
+        user=DB_CONFIG_SCADA['user'],
+        password=DB_CONFIG_SCADA['password'],
+        database=DB_CONFIG_SCADA['database'],
+        charset='utf8mb4',
+        cursorclass=pymysql.cursors.DictCursor
+    )
+```
+
+```
+serve(app, host='0.0.0.0', port=5000, threads=32)
 ```
 
