@@ -398,6 +398,20 @@ def process_data():
                     if mapped_key is not None:
                         mapped[mapped_key] = v
 
+                # 加工方式值转换：101=仪表磨，100=定程磨
+                if '加工方式' in mapped:
+                    process_mode_map = {
+                        101: '仪表磨',
+                        100: '定程磨'
+                    }
+                    mode_value = mapped['加工方式']
+                    try:
+                        mode_key = int(float(mode_value))
+                    except (TypeError, ValueError):
+                        mode_key = None
+                    if mode_key in process_mode_map:
+                        mapped['加工方式'] = process_mode_map[mode_key]
+
                 print(f"[查询成功] code={code}, 耗时: {elapsed:.2f}ms, 原始字段数={len(result)}, 映射字段数={len(mapped)}")
                 return jsonify({
                     'success': True,
