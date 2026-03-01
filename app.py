@@ -42,7 +42,7 @@ DB_CONFIG_SCADA = {
     'port': 3306,
     'user': 'bigdata',
     'password': 'bigdata@z6wRPj',
-    'database': 'iplantute'
+    'database': 'iplant'
 }
 
 # 数据库配置 - MES 
@@ -74,7 +74,7 @@ def load_variable_name_map():
         connection = db_pool_scada.connection()
         with connection.cursor() as cursor:
             # 查询设备参数表
-            sql = "SELECT Code, VariableName, Name FROM iplantute.dms_device_parameter"
+            sql = "SELECT Code, VariableName, Name FROM iplant.dms_device_parameter"
             cursor.execute(sql)
             rows = cursor.fetchall()
             
@@ -202,6 +202,155 @@ def cleanup():
 # 注册退出时的清理函数
 atexit.register(cleanup)
 
+#设备运行状态    输入code 01-1-3MZY1310
+@app.route('/api/device_status', methods=['GET', 'POST'])
+def device_status():
+    start_time = time.time()
+    connection = None
+    
+    try:
+        # 获取 code 参数
+        if request.method == 'POST':
+            code = request.json.get('code')
+        else:
+            code = request.args.get('code')
+        
+        if not code:
+            elapsed = (time.time() - start_time) * 1000
+            print(f"[请求失败] 耗时: {elapsed:.2f}ms - 缺少 code 参数")
+            return jsonify({
+                'success': False,
+                'error': '缺少 code 参数'
+            }), 400
+        code = code.replace('_', '-')
+        # 从连接池获取连接
+        connection = db_pool_scada.connection()
+        
+        with connection.cursor() as cursor:
+            # ===== Step 1：查 AssetNo（最优先）=====
+            sql1 = """
+            SELECT AssetNo
+            FROM iplant.dms_device_ledger
+            WHERE Code = %s
+            LIMIT 1
+            """
+
+            cursor.execute(sql1, (code,))
+            row = cursor.fetchone()
+
+            if not row:
+                elapsed = (time.time() - start_time) * 1000
+                return jsonify({
+                    'success': True,
+                    'data': "Unknow",
+                    'message': '未查询到数据',
+                    'elapsed_ms': round(elapsed, 2)
+                })
+
+            asset_no = row[0] if not isinstance(row, dict) else row.get("AssetNo")
+
+            # ===== Step 2：查设备状态（直接索引查找）=====
+            sql2 = """
+            SELECT DeviceStatus
+            FROM iplant.dms_device_status
+            WHERE DeviceID = %s
+            LIMIT 1
+            """
+
+            cursor.execute(sql2, (int(asset_no),))
+            row = cursor.fetchone()
+
+            if not row:
+                elapsed = (time.time() - start_time) * 1000
+                return jsonify({
+                    'success': True,
+                    'data': "Unknow",
+                    'message': '未查询到数据',
+                    'elapsed_ms': round(elapsed, 2)
+                })
+
+            result = row[0] if not isinstance(row, dict) else row.get("DeviceStatus")
+
+            if isinstance(result, dict):
+                result = (
+                    result.get("value")
+                    or result.get("status")
+                    or result.get("DeviceStatus")
+                    or result.get("device_status")
+                )
+
+            if result is not None and not isinstance(result, int):
+                try:
+                    result = int(result)
+                except (TypeError, ValueError):
+                    elapsed = (time.time() - start_time) * 1000
+                    return jsonify({
+                        'success': False,
+                        'error': f'DeviceStatus 类型异常: {type(result).__name__}',
+                        'elapsed_ms': round(elapsed, 2)
+                    }), 500
+            
+            elapsed = (time.time() - start_time) * 1000
+            
+            if result is not None:
+
+                binary_str = format(result, '032b')
+                reversed_bin = binary_str[::-1]
+
+                status_map = {
+                    1: "开机",
+                    2: "运行",
+                    5: "故障报警",
+                    9: "等待",
+                    10: "设置",
+                    11: "维护",
+                    17: "NC暂停(等待)",
+                    18: "缺料(等待)",
+                    19: "NC停止(等待)",
+                    20: "搬运模式(运行)",
+                    21: "空循环模式(运行)"
+                }
+
+                active_status = []
+
+                for bit_pos, status_name in status_map.items():
+                    if len(reversed_bin) >= bit_pos and reversed_bin[bit_pos - 1] == '1':
+                        active_status.append(status_name)
+
+                if not active_status:
+                    ch_status = "关机断线"
+                else:
+                    ch_status = "，".join(active_status)
+
+                print(f"[查询成功] code={code}, 耗时: {elapsed:.2f}ms")
+
+                return jsonify({
+                    'success': True,
+                    'data': ch_status,
+                    'elapsed_ms': round(elapsed, 2)
+                })
+            else:
+                print(f"[无数据] code={code}, 耗时: {elapsed:.2f}ms")
+                return jsonify({
+                    'success': True,
+                    'data': "Unknow",
+                    'message': '未查询到数据',
+                    'elapsed_ms': round(elapsed, 2)
+                })
+                
+    except Exception as e:
+        elapsed = (time.time() - start_time) * 1000
+        print(f"[查询异常] 耗时: {elapsed:.2f}ms - 错误: {str(e)}")
+        return jsonify({
+            'success': False,
+            'error': str(e),
+            'elapsed_ms': round(elapsed, 2)
+        }), 500
+    
+    finally:
+        # 归还连接到连接池
+        if connection:
+            connection.close()
 
 # 工艺数据
 @app.route('/api/process_data', methods=['GET', 'POST'])
@@ -230,7 +379,7 @@ def process_data():
         with connection.cursor() as cursor:
             # 执行查询
             table_name = f"dms_device_technology_{code}"
-            sql = f"SELECT * FROM iplantute.`{table_name}` ORDER BY ID DESC LIMIT 1"
+            sql = f"SELECT * FROM iplant.`{table_name}` ORDER BY ID DESC LIMIT 1"
             cursor.execute(sql)
             result = cursor.fetchone()
             
@@ -305,7 +454,7 @@ def efficiency_data():
         with connection.cursor() as cursor:
             # 执行查询
             table_name = f"dms_device_workparams_{code}"
-            sql = f"SELECT * FROM iplantute.`{table_name}` ORDER BY ID DESC LIMIT 1"
+            sql = f"SELECT * FROM iplant.`{table_name}` ORDER BY ID DESC LIMIT 1"
             cursor.execute(sql)
             result = cursor.fetchone()
             

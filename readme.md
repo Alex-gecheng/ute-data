@@ -379,6 +379,40 @@ curl http://localhost:5000/api/home_inspection
 
 ------
 
+## 7.机器状态查询
+
+显示时查询一次
+
+### 接口地址
+
+```
+/api/device_status
+```
+
+### 请求示例
+
+```
+curl -X POST http://localhost:5000/api/device_status ^
+-H "Content-Type: application/json" ^
+-d "{\"code\":\"01-1-3MZY1310\"}"
+```
+
+### 请求参数
+
+| 参数名 | 类型   | 必填 | 说明            |
+| ------ | ------ | ---- | --------------- |
+| code   | string | 是   | 可以使用下划线_ |
+
+### 返回示例
+
+```
+{"data":"开机，运行","elapsed_ms":70.02,"success":true}
+```
+
+
+
+
+
 
 
 
