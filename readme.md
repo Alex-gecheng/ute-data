@@ -8,6 +8,8 @@
 - **数据格式**：
   - 请求：`application/json`
   - 响应：`application/json`
+- **数据库**:iplant
+
 - **请求频率**：
   - 常规接口：**1 次 / 秒**
   - 在线巡检接口：**1 次 / 10 秒（0.1 QPS）**
@@ -49,8 +51,8 @@
 #### cmd
 
 ```bash
-curl -X POST http://localhost:5000/api/process_data \
- -H "Content-Type: application/json" \
+curl -X POST http://localhost:5000/api/process_data ^
+ -H "Content-Type: application/json" ^
  -d '{"code":"07_4_3mz2010"}'
 ```
 
@@ -61,7 +63,7 @@ curl -X POST http://localhost:5000/api/process_data \
   "success": true,
   "elapsed_ms": 48.5,
   "data": {
-    "加工方式": 101,
+    "加工方式": "仪表磨",
     "砂轮序号": 51,
     "砂轮线速度": 30.0,
     "砂轮轴转速": 23885.0,
