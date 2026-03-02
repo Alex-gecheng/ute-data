@@ -408,12 +408,18 @@ curl -X POST http://localhost:5000/api/device_status ^
 ### 返回示例
 
 ```
-{"data":"开机，运行","elapsed_ms":70.02,"success":true}
+{"data":0,"elapsed_ms":70.02,"success":true}
 ```
 
-
-
-
+| 状态码 | 状态     |
+| ------ | -------- |
+| 0      | 关机     |
+| 1      | 开机     |
+| 2      | 运行     |
+| 3      | 故障报警 |
+| 4      | 等待     |
+| 5      | 设置     |
+| 6      | 维护     |
 
 
 

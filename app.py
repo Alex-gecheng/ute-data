@@ -297,36 +297,39 @@ def device_status():
                 binary_str = format(result, '032b')
                 reversed_bin = binary_str[::-1]
 
-                status_map = {
-                    1: "开机",
-                    2: "运行",
-                    5: "故障报警",
-                    9: "等待",
-                    10: "设置",
-                    11: "维护",
-                    17: "NC暂停(等待)",
-                    18: "缺料(等待)",
-                    19: "NC停止(等待)",
-                    20: "搬运模式(运行)",
-                    21: "空循环模式(运行)"
-                }
+                # 状态映射：位 -> 状态码
+                # 按优先级检查：故障报警 > 运行 > 等待 > 设置 > 维护 > 开机
+                status_code = 0  # 默认为关机
+                
+                # bit 5: 故障报警 -> 3
+                if len(reversed_bin) >= 5 and reversed_bin[4] == '1':
+                    status_code = 3
+                # bit 2, 20, 21: 运行相关 -> 2
+                elif (len(reversed_bin) >= 2 and reversed_bin[1] == '1') or \
+                     (len(reversed_bin) >= 20 and reversed_bin[19] == '1') or \
+                     (len(reversed_bin) >= 21 and reversed_bin[20] == '1'):
+                    status_code = 2
+                # bit 9, 17, 18, 19: 等待相关 -> 4
+                elif (len(reversed_bin) >= 9 and reversed_bin[8] == '1') or \
+                     (len(reversed_bin) >= 17 and reversed_bin[16] == '1') or \
+                     (len(reversed_bin) >= 18 and reversed_bin[17] == '1') or \
+                     (len(reversed_bin) >= 19 and reversed_bin[18] == '1'):
+                    status_code = 4
+                # bit 10: 设置 -> 5
+                elif len(reversed_bin) >= 10 and reversed_bin[9] == '1':
+                    status_code = 5
+                # bit 11: 维护 -> 6
+                elif len(reversed_bin) >= 11 and reversed_bin[10] == '1':
+                    status_code = 6
+                # bit 1: 开机 -> 1
+                elif len(reversed_bin) >= 1 and reversed_bin[0] == '1':
+                    status_code = 1
 
-                active_status = []
-
-                for bit_pos, status_name in status_map.items():
-                    if len(reversed_bin) >= bit_pos and reversed_bin[bit_pos - 1] == '1':
-                        active_status.append(status_name)
-
-                if not active_status:
-                    ch_status = "关机断线"
-                else:
-                    ch_status = "，".join(active_status)
-
-                print(f"[查询成功] code={code}, 耗时: {elapsed:.2f}ms")
+                print(f"[查询成功] code={code}, status_code={status_code}, 耗时: {elapsed:.2f}ms")
 
                 return jsonify({
                     'success': True,
-                    'data': ch_status,
+                    'data': status_code,
                     'elapsed_ms': round(elapsed, 2)
                 })
             else:
