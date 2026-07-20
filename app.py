@@ -8,6 +8,23 @@ import csv
 import os
 from waitress import serve
 from flask_cors import CORS
+import asyncio
+import threading
+import logging
+from asyncua import Client
+
+# ==================================================
+# 日志配置
+# ==================================================
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger = logging.getLogger(__name__)
+
+# 屏蔽 asyncua 内部 Publish 保活日志
+logging.getLogger("asyncua").setLevel(logging.WARNING)
 
 app = Flask(__name__)
 
@@ -36,7 +53,7 @@ SSH_CONFIG = {
     'password': 'ute@2018'
 }
 
-#  数据库配置 - SCADA (
+#  数据库配置 - SCADA 
 DB_CONFIG_SCADA = {
     'host': '192.168.10.251',
     'port': 3306,
@@ -825,6 +842,631 @@ def pool_status():
             'status': 'partial',
             'pool_info': status
         }), 503
+
+
+# ==================================================
+# OPC UA 配置
+# ==================================================
+USERNAME = os.getenv("OPCUA_USERNAME", "OpcUaClient")
+PASSWORD = os.getenv("OPCUA_PASSWORD", "OpcUaClient")
+PORT = int(os.getenv("OPCUA_PORT", "4840"))
+MAX_MACHINES = int(os.getenv("MAX_MACHINES", "50"))
+HEALTH_CHECK_INTERVAL = 5  # 健康检查间隔（秒）
+RECONNECT_DELAY = 5         # 重连间隔（秒）
+STAGE_IDLE_TIMEOUT = 3      # 阶段超时空闲判断（秒）：超过此时间无 DataChange 则认为空闲
+
+# ==================================================
+# 加工阶段：数据key → 中文名称
+# ==================================================
+_STAGE_KEY_TO_NAME = {
+    "fast_forward": "快进",
+    "fast_approach": "快趋",
+    "rough1": "粗磨1",
+    "rough2": "粗磨2",
+    "accurate": "精磨",
+    "buffing": "光磨",
+    "return_tool": "退刀",
+}
+
+# ==================================================
+# OPC UA 订阅节点列表
+# ==================================================
+_SUBSCRIBE_NODES = [
+    # --- 加工计数与时间 ---
+    "ns=2;s=/Nck/State/aDbd[420]",   # 工件计数
+    "ns=2;s=/Nck/State/aDbw[428]",   # 加工总时间
+    # --- 各阶段累计计时 ---
+    "ns=2;s=/Nck/State/aDbw[430]",   # 快进
+    "ns=2;s=/Nck/State/aDbw[432]",   # 快趋
+    "ns=2;s=/Nck/State/aDbw[434]",   # 粗磨1
+    "ns=2;s=/Nck/State/aDbw[436]",   # 粗磨2
+    "ns=2;s=/Nck/State/aDbw[438]",   # 精磨
+    "ns=2;s=/Nck/State/aDbw[440]",   # 光磨
+    "ns=2;s=/Nck/State/aDbw[442]",   # 退刀
+    # --- 运行状态 ---
+    "ns=2;s=/Nck/State/aDbw[820]",   # 生产状态（Bit0:生产 Bit1:空运行 Bit2:调整 Bit3:故障）
+    "ns=2;s=/Nck/State/aDbw[822]",   # 等待状态（Bit0:等待缺料 Bit1:NC暂停）
+]
+
+
+# ==================================================
+# 单台机床客户端
+# ==================================================
+class MachineClient:
+    """管理单台机床的 OPC UA 连接、订阅、数据缓存（线程安全）"""
+
+    def __init__(self, ip):
+        self.ip = ip
+        self.client = None
+        self.subscriptions = []          # Subscription 列表（正常 len=1），用于 _disconnect 统一清理
+        self.subscription_handles = []   # MonitoredItem handle 列表
+        self.connected = False
+
+        # 等待首次连接完成（重连时会被 clear，保证状态准确）
+        self.ready = threading.Event()
+
+        # 线程安全锁（保护所有共享数据）
+        self.lock = threading.Lock()
+
+        # ---- 数据缓存 ----
+        self.data = {
+            "work_count": 0,
+            "work_time": 0,
+            "fast_forward": 0,
+            "fast_approach": 0,
+            "rough1": 0,
+            "rough2": 0,
+            "accurate": 0,
+            "buffing": 0,
+            "return_tool": 0,
+            "stage": "空闲",
+            "stage_time": 0,
+            "machine_state": {
+                "production": False,
+                "standstill": False,
+                "adjust": False,
+                "malfunction": False,
+                "wait_feed": False,
+                "nc_suspend": False,
+            },
+        }
+
+        # ---- 加工阶段追踪 ----
+        # current_stage: 最近一次收到 DataChange 的阶段 timer key（如 "accurate"）
+        # 仅 OPC UA 订阅回调（DataChange 通知）会更新此字段，初始读取不会。
+        self.current_stage = None
+        self.stage_update_time = 0  # 最近一次阶段 DataChange 的时间戳
+
+        # 初始同步标记：True 期间不触发 current_stage 更新
+        self._initial_sync = False
+
+        # 最后一次数据更新时间戳
+        self._last_update_time = 0
+
+        # 后台 asyncio 线程
+        self.thread = None
+
+    # =============================================
+    # 启动后台线程
+    # =============================================
+    def start(self):
+        """启动后台 asyncio 线程（幂等）"""
+        if self.thread is None:
+            self.thread = threading.Thread(
+                target=self._run_loop,
+                daemon=True,
+                name=f"OPC-{self.ip}",
+            )
+            self.thread.start()
+            logger.info("后台线程已启动: %s", self.ip)
+
+    def _run_loop(self):
+        """线程入口：创建独立 asyncio 事件循环"""
+        asyncio.run(self.connect_loop())
+
+    # =============================================
+    # 自动重连循环
+    # =============================================
+    async def connect_loop(self):
+        """主循环：连接 → 健康检查 → 断连 → 重连"""
+        while True:
+            try:
+                # === 确保旧资源已清理 ===
+                await self._disconnect()
+                await self.connect()
+
+                # 连接成功 → 周期健康检查
+                while True:
+                    with self.lock:
+                        if not self.connected:
+                            break
+                    await asyncio.sleep(HEALTH_CHECK_INTERVAL)
+
+                    if not await self._health_check():
+                        logger.warning("健康检查失败: %s，主动断开重连", self.ip)
+                        await self._disconnect()
+                        break  # 跳出内层 while，进入外层重连
+
+            except Exception as e:
+                logger.error("连接异常: %s - %s", self.ip, e)
+                await self._disconnect()
+
+            # 统一重连等待
+            logger.info("%s — %d 秒后重连...", self.ip, RECONNECT_DELAY)
+            await asyncio.sleep(RECONNECT_DELAY)
+
+    # =============================================
+    # OPC UA 连接
+    # =============================================
+    async def connect(self):
+        """建立 OPC UA 连接并创建订阅。
+        顺序：connect → connected=True → create_subscription → ready.set()
+        ready.set() 必须在 Subscription + MonitoredItem 全部就绪之后，
+        确保 HTTP 层拿到的是真正可用的数据。"""
+        url = f"opc.tcp://{self.ip}:{PORT}"
+        self.client = Client(url)
+        self.client.set_user(USERNAME)
+        self.client.set_password(PASSWORD)
+
+        await self.client.connect()
+        logger.info("OPC UA 连接成功: %s", self.ip)
+
+        with self.lock:
+            self.connected = True
+
+        await self.create_subscription()
+
+        # Subscription + MonitoredItem 全部就绪后才标记 ready
+        self.ready.set()
+
+    # =============================================
+    # 创建订阅（1 机床 = 1 Subscription + 11 MonitoredItem）
+    # =============================================
+    async def create_subscription(self):
+        """
+        创建一个 OPC UA Subscription，将所有 _SUBSCRIBE_NODES 挂载为 MonitoredItem。
+
+        架构：
+            Session
+             └── Subscription × 1
+                   ├── MonitoredItem (node 1)
+                   ├── MonitoredItem (node 2)
+                   └── ... (共 11 个)
+
+        时序：
+            1. _initial_sync = True   （阻止阶段误判）
+            2. 创建 Subscription
+            3. 创建所有 MonitoredItem（先建立订阅通道）
+            4. 读取初始值填充缓存
+            5. _initial_sync = False  （后续 DataChange 正常更新阶段）
+
+        异常回滚：任何步骤失败都会删除已创建的 Subscription，清理列表。
+        """
+        machine = self  # 闭包引用
+
+        class SubscriptionHandler:
+            def datachange_notification(self, node, value, data):
+                machine._on_data_change(node.nodeid.Identifier, value)
+
+        sub = None
+
+        try:
+            # ====== Step 1: 标记初始同步 ======
+            with self.lock:
+                self._initial_sync = True
+
+            # ====== Step 2: 收集所有节点 ======
+            nodes = []
+            for node_str in _SUBSCRIBE_NODES:
+                node = self.client.get_node(node_str)
+                nodes.append(node)
+
+            # ====== Step 3: 创建 1 个 Subscription ======
+            logger.info("%s 创建 OPC UA Subscription", self.ip)
+            sub = await self.client.create_subscription(1000, SubscriptionHandler())
+            self.subscriptions.append(sub)
+
+            # ====== Step 4: 创建 MonitoredItem（先建立通道，再读初始值） ======
+            handles = await sub.subscribe_data_change(nodes)
+            self.subscription_handles = handles if isinstance(handles, list) else [handles]
+
+            # ====== Step 5: 读取初始值（Subscription 已建立，无数据丢失窗口） ======
+            for node in nodes:
+                try:
+                    value = await node.read_value()
+                    self._on_data_change(node.nodeid.Identifier, value)
+                    logger.info("%s 初始值 %s = %s", self.ip, node.nodeid.Identifier, value)
+                except Exception as e:
+                    logger.warning("读取初始值失败 %s - %s: %s", self.ip, node.nodeid.Identifier, e)
+
+            # ====== Step 6: 初始同步完成 ======
+            with self.lock:
+                self._initial_sync = False
+
+            logger.info("%s 订阅完成: MonitoredItems=%d, Subscriptions=%d",
+                        self.ip, len(nodes), len(self.subscriptions))
+
+        except Exception:
+            # ====== 异常回滚：删除已创建的 Subscription ======
+            if sub is not None:
+                try:
+                    await sub.delete()
+                except Exception as cleanup_err:
+                    logger.warning("回滚删除 Subscription 失败 %s: %s", self.ip, cleanup_err)
+            self.subscriptions.clear()
+            self.subscription_handles.clear()
+            raise
+
+    # =============================================
+    # 健康检查
+    # =============================================
+    async def _health_check(self):
+        """
+        通过读取 OPC UA ServerState 节点探测连接是否存活。
+        返回值：True=健康, False=异常
+        """
+        if self.client is None:
+            return False
+        try:
+            node = self.client.get_node("i=2259")
+            await asyncio.wait_for(node.read_value(), timeout=3)
+            return True
+        except Exception:
+            return False
+
+    # =============================================
+    # 断开连接（完整清理，避免残留订阅）
+    # =============================================
+    async def _disconnect(self):
+        """
+        清理断开连接。幂等，可安全重复调用。
+
+        清理顺序：
+        1. 标记 connected=False + ready.clear()
+        2. 删除所有 Subscription
+        3. 断开 client
+        4. 清空 handles、重置阶段追踪
+        """
+        was_connected = self.connected
+        with self.lock:
+            self.connected = False
+        self.ready.clear()
+
+        # ---- 删除所有订阅（先于 client 断开，避免 BadNoSubscription）----
+        for sub in list(self.subscriptions):
+            try:
+                await sub.delete()
+                logger.info("订阅已删除: %s", self.ip)
+            except Exception as e:
+                logger.warning("删除 Subscription 失败 %s: %s", self.ip, e)
+        self.subscriptions.clear()
+        self.subscription_handles.clear()
+
+        # ---- 断开 client ----
+        if self.client is not None:
+            try:
+                await self.client.disconnect()
+                logger.info("OPC 客户端已断开: %s", self.ip)
+            except Exception as e:
+                logger.warning("断开 Client 失败 %s: %s", self.ip, e)
+            self.client = None
+
+        # ---- 重置阶段追踪 ----
+        with self.lock:
+            self.current_stage = None
+            self.stage_update_time = 0
+
+        if was_connected:
+            logger.info("完整断开清理完成: %s", self.ip)
+
+    # =============================================
+    # 数据变更回调（OPC UA 订阅线程调用）
+    # =============================================
+    def _on_data_change(self, nid, value):
+        """
+        处理 DataChange 通知 & 初始值读取。
+
+        阶段判断原则：
+        - OPC UA DataChange 通知到达 = 该计时器正在累加 = 当前加工阶段
+        - 不根据累计值 > 0 判断（加工完成后历史值仍然 >0）
+        - _initial_sync=True 时只记录基准值，不触发阶段判断
+
+        参数：
+            nid: 节点标识符字符串（如 "aDbd[420]", "aDbw[438]"）
+            value: 节点当前值
+        """
+        with self.lock:
+            self._last_update_time = time.time()
+
+            # --- 工件计数 ---
+            if "aDbd[420]" in nid:
+                self.data["work_count"] = value
+
+            # --- 加工总时间 ---
+            elif "aDbw[428]" in nid:
+                self.data["work_time"] = value
+
+            # --- 各阶段累计计时 ---
+            # DataChange 到达 → 该计时器正在变化 → 当前阶段
+            elif "aDbw[430]" in nid:
+                self.data["fast_forward"] = value
+                if not self._initial_sync:
+                    self.current_stage = "fast_forward"
+                    self.stage_update_time = time.time()
+            elif "aDbw[432]" in nid:
+                self.data["fast_approach"] = value
+                if not self._initial_sync:
+                    self.current_stage = "fast_approach"
+                    self.stage_update_time = time.time()
+            elif "aDbw[434]" in nid:
+                self.data["rough1"] = value
+                if not self._initial_sync:
+                    self.current_stage = "rough1"
+                    self.stage_update_time = time.time()
+            elif "aDbw[436]" in nid:
+                self.data["rough2"] = value
+                if not self._initial_sync:
+                    self.current_stage = "rough2"
+                    self.stage_update_time = time.time()
+            elif "aDbw[438]" in nid:
+                self.data["accurate"] = value
+                if not self._initial_sync:
+                    self.current_stage = "accurate"
+                    self.stage_update_time = time.time()
+            elif "aDbw[440]" in nid:
+                self.data["buffing"] = value
+                if not self._initial_sync:
+                    self.current_stage = "buffing"
+                    self.stage_update_time = time.time()
+            elif "aDbw[442]" in nid:
+                self.data["return_tool"] = value
+                if not self._initial_sync:
+                    self.current_stage = "return_tool"
+                    self.stage_update_time = time.time()
+
+            # --- 生产状态 aDbw[820] ---
+            elif "aDbw[820]" in nid:
+                try:
+                    v = int(value)
+                    self.data["machine_state"]["production"] = bool(v & 0x01)
+                    self.data["machine_state"]["standstill"] = bool(v & 0x02)
+                    self.data["machine_state"]["adjust"] = bool(v & 0x04)
+                    self.data["machine_state"]["malfunction"] = bool(v & 0x08)
+                except (TypeError, ValueError):
+                    logger.warning("无法解析 aDbw[820] 值: %s", value)
+
+            # --- 等待状态 aDbw[822] ---
+            elif "aDbw[822]" in nid:
+                try:
+                    v = int(value)
+                    self.data["machine_state"]["wait_feed"] = bool(v & 0x01)
+                    self.data["machine_state"]["nc_suspend"] = bool(v & 0x02)
+                except (TypeError, ValueError):
+                    logger.warning("无法解析 aDbw[822] 值: %s", value)
+
+    # =============================================
+    # 阶段解析（供 get_data 调用，在锁内执行）
+    # =============================================
+    def _parse_stage(self):
+        """
+        根据 DataChange 最近变化 + 异常状态优先级 + 超时判断当前阶段。
+
+        优先级（从高到低）：
+        1. 故障（machine_state.malfunction）
+        2. NC暂停（machine_state.nc_suspend）
+        3. 等待缺料（machine_state.wait_feed）
+        4. 正常加工阶段（基于最近 DataChange 的计时器）
+        5. 空闲（超时或无 DataChange）
+        """
+        ms = self.data["machine_state"]
+
+        # Priority 1: 故障
+        if ms["malfunction"]:
+            self.data["stage"] = "故障"
+            self.data["stage_time"] = 0
+            return
+
+        # Priority 2: NC暂停
+        if ms["nc_suspend"]:
+            self.data["stage"] = "NC暂停"
+            self.data["stage_time"] = 0
+            return
+
+        # Priority 3: 等待缺料
+        if ms["wait_feed"]:
+            self.data["stage"] = "等待缺料"
+            self.data["stage_time"] = 0
+            return
+
+        # ---- 正常加工阶段判断 ----
+
+        # 超时检测：超过 STAGE_IDLE_TIMEOUT 无阶段 DataChange → 空闲
+        if self.stage_update_time > 0:
+            elapsed = time.time() - self.stage_update_time
+            if elapsed > STAGE_IDLE_TIMEOUT:
+                self.data["stage"] = "空闲"
+                self.data["stage_time"] = 0
+                return
+
+        # 从未收到过阶段 DataChange → 空闲
+        if self.current_stage is None:
+            self.data["stage"] = "空闲"
+            self.data["stage_time"] = 0
+            return
+
+        # 根据 current_stage 查找阶段名称
+        stage_name = _STAGE_KEY_TO_NAME.get(self.current_stage)
+        if stage_name is None:
+            self.data["stage"] = "空闲"
+            self.data["stage_time"] = 0
+            return
+
+        # 取对应计时变量的当前值
+        current_value = self.data.get(self.current_stage, 0)
+        if current_value > 0:
+            self.data["stage"] = stage_name
+            self.data["stage_time"] = round(current_value * 0.01, 2)
+        else:
+            self.data["stage"] = "空闲"
+            self.data["stage_time"] = 0
+
+    # =============================================
+    # 线程安全的数据读取（供 HTTP 层调用）
+    # =============================================
+    def get_data(self):
+        """
+        返回数据副本。在锁保护下执行阶段解析和数据拷贝。
+
+        Flask 请求线程调用此方法，与 OPC UA 回调线程互斥。
+        """
+        with self.lock:
+            # 先解析阶段，再返回数据
+            self._parse_stage()
+
+            # 浅拷贝顶层 + 独立拷贝 machine_state 嵌套 dict
+            result = self.data.copy()
+            result["machine_state"] = dict(self.data["machine_state"])
+
+            # 附加时间戳
+            if self._last_update_time > 0:
+                result["timestamp"] = time.strftime(
+                    "%Y-%m-%dT%H:%M:%S",
+                    time.localtime(self._last_update_time),
+                )
+            else:
+                result["timestamp"] = ""
+
+            return result
+
+
+# ==================================================
+# 多机床管理器
+# ==================================================
+class MachineManager:
+    """管理所有机床客户端，限制最大连接数，提供查询接口"""
+
+    def __init__(self):
+        self.machines = {}  # ip → MachineClient
+        self.lock = threading.Lock()
+
+    def get(self, ip):
+        """
+        获取或创建机床客户端。
+        首次创建时启动后台线程并等待连接就绪。
+        """
+        with self.lock:
+            if ip not in self.machines:
+                if len(self.machines) >= MAX_MACHINES:
+                    raise RuntimeError(
+                        f"too many machines: {len(self.machines)} >= {MAX_MACHINES}"
+                    )
+                machine = MachineClient(ip)
+                self.machines[ip] = machine
+                machine.start()
+            else:
+                machine = self.machines[ip]
+
+        if not machine.ready.is_set():
+            machine.ready.wait(timeout=5)
+
+        return machine
+
+    def get_all(self, ips):
+        """批量获取机床客户端"""
+        result = {}
+        for ip in ips:
+            try:
+                result[ip] = self.get(ip)
+            except RuntimeError:
+                raise
+        return result
+
+    def get_count(self):
+        """返回当前管理的机床数量"""
+        with self.lock:
+            return len(self.machines)
+
+
+# ==================================================
+# 全局实例
+# ==================================================
+manager = MachineManager()
+
+
+# ==================================================
+# Flask API — 单机床查询
+# ==================================================
+@app.route("/api/machine/status", methods=["GET"])
+def machine_status():
+    """
+    GET /api/machine/status?ip=192.168.11.206
+    """
+    ip = request.args.get("ip")
+    if not ip:
+        return jsonify({"error": "missing ip"}), 400
+
+    try:
+        machine = manager.get(ip)
+    except RuntimeError as e:
+        return jsonify({"error": str(e)}), 429
+
+    data = machine.get_data()
+    return jsonify({
+        "ip": ip,
+        "connected": machine.connected,
+        "data": data,
+    })
+
+
+# ==================================================
+# Flask API — 批量查询
+# ==================================================
+@app.route("/api/machines/status", methods=["GET"])
+def machines_status():
+    """
+    GET /api/machines/status?ips=192.168.11.206,192.168.11.207
+    """
+    ips_raw = request.args.get("ips", "")
+    if not ips_raw:
+        return jsonify({"error": "missing ips"}), 400
+
+    ip_list = [ip.strip() for ip in ips_raw.split(",") if ip.strip()]
+    if not ip_list:
+        return jsonify({"error": "empty ips"}), 400
+
+    try:
+        machines = manager.get_all(ip_list)
+    except RuntimeError as e:
+        return jsonify({"error": str(e)}), 429
+
+    result = {}
+    for ip in ip_list:
+        try:
+            machine = machines.get(ip)
+            if machine is None:
+                result[ip] = {"connected": False, "data": None, "error": "unknown"}
+            else:
+                data = machine.get_data()
+                result[ip] = {
+                    "connected": machine.connected,
+                    "data": data,
+                }
+        except RuntimeError as e:
+            result[ip] = {"connected": False, "data": None, "error": str(e)}
+
+    return jsonify({"machines": result})
+
+
+# ==================================================
+# 健康检查 & 状态接口
+# ==================================================
+@app.route("/api/machines/count", methods=["GET"])
+def machines_count():
+    return jsonify({
+        "count": manager.get_count(),
+        "max": MAX_MACHINES,
+    })
+
 
 if __name__ == '__main__':
     # 启动前初始化连接池

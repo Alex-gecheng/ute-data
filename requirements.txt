@@ -4,3 +4,4 @@ DBUtils==3.1.2
 waitress==3.0.2
 flask-cors==6.0.2
 sshtunnel==0.4.0
+opcua-asyncio>=1.0.0
