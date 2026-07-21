@@ -861,10 +861,10 @@ STAGE_IDLE_TIMEOUT = 3      # 阶段超时空闲判断（秒）：超过此时�
 _STAGE_KEY_TO_NAME = {
     "fast_forward": "快进",
     "fast_approach": "快趋",
-    "rough1": "粗磨1",
-    "rough2": "粗磨2",
-    "accurate": "精磨",
-    "buffing": "光磨",
+    "rough1": "磨削",
+    "rough2": "磨削",
+    "accurate": "磨削",
+    "buffing": "磨削",
     "return_tool": "退刀",
 }
 
@@ -878,10 +878,10 @@ _SUBSCRIBE_NODES = [
     # --- 各阶段累计计时 ---
     "ns=2;s=/Nck/State/aDbw[430]",   # 快进
     "ns=2;s=/Nck/State/aDbw[432]",   # 快趋
-    "ns=2;s=/Nck/State/aDbw[434]",   # 粗磨1
-    "ns=2;s=/Nck/State/aDbw[436]",   # 粗磨2
-    "ns=2;s=/Nck/State/aDbw[438]",   # 精磨
-    "ns=2;s=/Nck/State/aDbw[440]",   # 光磨
+    "ns=2;s=/Nck/State/aDbw[434]",   # 磨削（粗磨1）
+    "ns=2;s=/Nck/State/aDbw[436]",   # 磨削（粗磨2）
+    "ns=2;s=/Nck/State/aDbw[438]",   # 磨削（精磨）
+    "ns=2;s=/Nck/State/aDbw[440]",   # 磨削（光磨）
     "ns=2;s=/Nck/State/aDbw[442]",   # 退刀
     # --- 运行状态 ---
     "ns=2;s=/Nck/State/aDbw[820]",   # 生产状态（Bit0:生产 Bit1:空运行 Bit2:调整 Bit3:故障）
@@ -1255,8 +1255,8 @@ class MachineClient:
         1. 故障（machine_state.malfunction）
         2. NC暂停（machine_state.nc_suspend）
         3. 等待缺料（machine_state.wait_feed）
-        4. 正常加工阶段（基于最近 DataChange 的计时器）
-        5. 空闲（超时或无 DataChange）
+        4. 正常加工阶段（快进/快趋/磨削/退刀，基于最近 DataChange 的计时器）
+       5. 空闲（超时或无 DataChange）
         """
         ms = self.data["machine_state"]
 

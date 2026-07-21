@@ -29,10 +29,10 @@ OPC UA 连接模型：
          ├── MonitoredItem (aDbw[428])  加工总时间
          ├── MonitoredItem (aDbw[430])  快进计时
          ├── MonitoredItem (aDbw[432])  快趋计时
-         ├── MonitoredItem (aDbw[434])  粗磨1计时
-         ├── MonitoredItem (aDbw[436])  粗磨2计时
-         ├── MonitoredItem (aDbw[438])  精磨计时
-         ├── MonitoredItem (aDbw[440])  光磨计时
+         ├── MonitoredItem (aDbw[434])  磨削计时(粗磨1)
+         ├── MonitoredItem (aDbw[436])  磨削计时(粗磨2)
+         ├── MonitoredItem (aDbw[438])  磨削计时(精磨)
+         ├── MonitoredItem (aDbw[440])  磨削计时(光磨)
          ├── MonitoredItem (aDbw[442])  退刀计时
          ├── MonitoredItem (aDbw[820])  生产状态（Bit0:生产 Bit1:空运行 Bit2:调整 Bit3:故障）
          └── MonitoredItem (aDbw[822])  等待状态（Bit0:等待缺料 Bit1:NC暂停）
@@ -424,11 +424,11 @@ GET /api/machine/status?ip=192.168.11.206
     "fast_forward": 0,
     "fast_approach": 0,
     "rough1": 2000,
-    "rough2": 0,
+    "rough2": 100,
     "accurate": 500,
     "buffing": 0,
     "return_tool": 0,
-    "stage": "精磨",
+    "stage": "磨削",
     "stage_time": 5.0,
     "machine_state": {
       "production": true,
@@ -449,7 +449,7 @@ GET /api/machine/status?ip=192.168.11.206
 |------|------|------|
 | `work_count` | int | 工件计数（累计） |
 | `work_time` | int | 加工总时间 |
-| `stage` | string | 当前阶段：快进 / 快趋 / 粗磨1 / 粗磨2 / 精磨 / 光磨 / 退刀 / 故障 / NC暂停 / 等待缺料 / 空闲 |
+| `stage` | string | 当前阶段：快进 / 快趋 / 磨削 / 退刀 / 故障 / NC暂停 / 等待缺料 / 空闲 |
 | `stage_time` | float | 当前阶段累计计时（秒） |
 | `machine_state` | object | 机床运行状态位（见下表） |
 | `timestamp` | string | 数据最后更新时间（ISO 8601） |
@@ -468,7 +468,7 @@ GET /api/machine/status?ip=192.168.11.206
 ### stage 优先级
 
 ```
-故障 > NC暂停 > 等待缺料 > 正常加工阶段 > 空闲
+故障 > NC暂停 > 等待缺料 > 磨削/快进/快趋/退刀 > 空闲
 ```
 
 当 `malfunction=true` 时，即使正在精磨，`stage` 也会返回 `"故障"`。
